@@ -256,6 +256,29 @@ def check_prerequisites() -> list[str]:
             missing.append(f"{label} ({cmd})")
 
     return missing
+    
+def missing_tool_for_module(module: Module) -> Optional[str]:
+    tool_map = {
+        "backend": "cargo",
+        "frontend": "npm",
+        "market": "go",
+        "frailbox": "make",
+        "engine": "cmake",
+        "compliance": "javac",
+        "v2-market-stream": "ruby",
+        "nfc-scanner": "luac",
+        "openapi-haskell": "ghc",
+        "openapi-tools": "luac",
+    }
+
+    tool = tool_map.get(module.name)
+    if not tool:
+        return None
+
+    if shutil.which(tool) is None:
+        return tool
+
+    return None
 
 def build_module(
     module: Module,
@@ -270,14 +293,18 @@ def build_module(
         env.update(module.env)
 
     start = time.time()
+    missing_tool = missing_tool_for_module(module)
+    if missing_tool:
+        return False, 0, f"Missing required tool '{missing_tool}' for module '{module.name}' (not installed or not on PATH)"
 
     if module.name == "frontend":
         node_modules = module.dir / "node_modules"
         if not node_modules.exists():
             print(f"       {color('npm install...', Colors.GRAY)}")
             try:
+                npm_exec = shutil.which("npm.cmd") or shutil.which("npm") or "npm.cmd"
                 install_result = subprocess.run(
-                    ["npm", "install"],
+                    [npm_exec, "install"],
                     cwd=str(module.dir),
                     capture_output=not verbose,
                     text=True,
@@ -288,30 +315,39 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"npm install command not found: {e}"
 
     if module.name == "engine":
-
         build_type = "Release" if release else "Debug"
-        cfg_result = subprocess.run(
-            ["cmake", "-S", ".", "-B", "build",
-             f"-DCMAKE_BUILD_TYPE={build_type}"],
-            cwd=str(module.dir),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
+        try:
+            cfg_result = subprocess.run(
+                ["cmake", "-S", ".", "-B", "build", f"-DCMAKE_BUILD_TYPE={build_type}"],
+                cwd=str(module.dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return False, time.time() - start, "CMake configure TIMEOUT (120s)"
+        except FileNotFoundError as e:
+            return False, time.time() - start, "Missing required tool 'cmake' for module 'engine' (not installed or not on PATH)"
+
         if cfg_result.returncode != 0:
-            return False, time.time() - start, (
-                f"CMake configure failed:\n{cfg_result.stderr}")
+            return False, time.time() - start, f"CMake configure failed:\n{cfg_result.stderr}"
+
         if verbose:
             print(f"       {color('cmake configured', Colors.GRAY)}")
+
         cmd = ["cmake", "--build", "build"]
         if release:
-            cmd.append("--config")
-            cmd.append("Release")
+            cmd.extend(["--config", "Release"])
     else:
         cmd = list(module.build_cmd)
+        if module.name == "frontend" and cmd[:3] == ["npm", "run", "build"]:
+            npm_exec = shutil.which("npm.cmd") or shutil.which("npm") or "npm.cmd"
+            cmd = [npm_exec, "run", "build"]
         if release and module.name == "backend":
             cmd.append("--release")
 
@@ -327,6 +363,9 @@ def build_module(
     except subprocess.TimeoutExpired:
         return False, time.time() - start, "BUILD TIMEOUT (300s)"
     except FileNotFoundError as e:
+        missing_tool = missing_tool_for_module(module)
+        if missing_tool:
+            return False, 0, f"Missing required tool '{missing_tool}' for module '{module.name}' (not installed or not on PATH)"
         return False, 0, f"Command not found: {e}"
 
     elapsed = time.time() - start
