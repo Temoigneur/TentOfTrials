@@ -322,7 +322,8 @@ def build_module(
         build_type = "Release" if release else "Debug"
         try:
             cfg_result = subprocess.run(
-                ["cmake", "-S", ".", "-B", "build", f"-DCMAKE_BUILD_TYPE={build_type}"],
+                ["cmake", "-S", ".", "-B", "build",
+                 f"-DCMAKE_BUILD_TYPE={build_type}"],
                 cwd=str(module.dir),
                 capture_output=True,
                 text=True,
@@ -331,12 +332,20 @@ def build_module(
             )
         except subprocess.TimeoutExpired:
             return False, time.time() - start, "CMake configure TIMEOUT (120s)"
-        except FileNotFoundError as e:
-            return False, time.time() - start, "Missing required tool 'cmake' for module 'engine' (not installed or not on PATH)"
+        except FileNotFoundError:
+            return False, time.time() - start, (
+                "Missing required tool 'cmake' for module 'engine' "
+                "(not installed or not on PATH)"
+            )
 
         if cfg_result.returncode != 0:
-            return False, time.time() - start, f"CMake configure failed:\n{cfg_result.stderr}"
-
+            output_lines = []
+            if cfg_result.stdout:
+                output_lines.append(cfg_result.stdout.strip())
+            if cfg_result.stderr:
+                output_lines.append(cfg_result.stderr.strip())
+            output = "\n".join(output_lines)
+            return False, time.time() - start, f"CMake configure failed:\n{output}"
         if verbose:
             print(f"       {color('cmake configured', Colors.GRAY)}")
 
@@ -605,12 +614,17 @@ def generate_logd(
             timeout=300,
         )
         if sr.returncode != 0:
+            error = sr.stderr.strip() or sr.stdout.strip() or "encryptly pack failed"
             print(
                 f"    {color('✗', Colors.RED)} {logd_path.relative_to(ROOT)} creation failed: "
-                f"{sr.stderr.strip() or sr.stdout.strip()}"
+                f"{error}"
             )
             if logd_path.exists():
                 logd_path.unlink()
+            write_diagnostic_report(
+                metadata_path,
+                build_diagnostic_report(results, commit_id, logd_error=error),
+            )
             return False
 
         safe_pw = sr.stdout.strip()
